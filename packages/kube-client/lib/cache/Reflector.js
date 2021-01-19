@@ -8,8 +8,6 @@
 
 const { format: fmt } = require('util')
 const delay = require('delay')
-const WebSocket = require('ws')
-const pEvent = require('p-event')
 const moment = require('moment')
 const { globalLogger: logger } = require('@gardener-dashboard/logger')
 const ListPager = require('./ListPager')
@@ -68,15 +66,10 @@ class Reflector {
     this.listWatcher = listWatcher
     this.store = store
     this.period = moment.duration(1, 'seconds')
-    this.gracePeriod = moment.duration(3, 'seconds')
-    this.connectTimeout = moment.duration(5, 'seconds')
-    this.heartbeatInterval = moment.duration(30, 'seconds')
-    this.heartbeatIntervalId = undefined
-    this.minWatchTimeout = moment.duration(50, 'minutes')
+    this.minWatchTimeout = moment.duration(5, 'minutes')
     this.isLastSyncResourceVersionUnavailable = false
     this.lastSyncResourceVersion = ''
     this.paginatedResult = false
-    this.socket = undefined
     this.stopRequested = false
     this.backoffManager = new BackoffManager()
   }
@@ -110,24 +103,6 @@ class Reflector {
     return this.lastSyncResourceVersion
   }
 
-  async closeOrTerminateSocket () {
-    if (!this.socket || this.socket.readyState === WebSocket.CLOSED) {
-      logger.debug('Socket of %s has already been closed', this.expectedTypeName)
-      return
-    }
-    logger.debug('Trying to gracefully close socket of %s', this.expectedTypeName)
-    const timeout = this.gracePeriod.asMilliseconds()
-    try {
-      const closeSocketPromise = pEvent(this.socket, 'close', { timeout })
-      this.socket.close(4006, 'Gracefully closing websocket')
-      await closeSocketPromise
-      logger.debug('Closed socket of %s', this.expectedTypeName)
-    } catch (err) {
-      this.socket.terminate()
-      logger.debug('Terminated socket of %s', this.expectedTypeName)
-    }
-  }
-
   stop () {
     this.stopRequested = true
     const agent = this.listWatcher.agent
@@ -135,7 +110,6 @@ class Reflector {
       agent.destroy()
     }
     this.backoffManager.clearTimeout()
-    return this.closeOrTerminateSocket()
   }
 
   async run () {
@@ -239,102 +213,48 @@ class Reflector {
     this.store.replace(list.items)
     this.lastSyncResourceVersion = resourceVersion
     while (!this.stopRequested) {
+      const options = {
+        allowWatchBookmarks: true,
+        timeoutSeconds: randomize(this.minWatchTimeout.asSeconds()),
+        resourceVersion: this.lastSyncResourceVersion
+      }
+
+      if (this.stopRequested) {
+        return
+      }
+
       try {
-        const options = {
-          allowWatchBookmarks: true,
-          timeoutSeconds: randomize(this.minWatchTimeout.asSeconds()),
-          resourceVersion: this.lastSyncResourceVersion
+        logger.debug('Watch %s with resourceVersion %s', this.expectedTypeName, options.resourceVersion)
+        const asyncIterable = await this.listWatcher.watch(options)
+        await this.watchHandler(asyncIterable)
+      } catch (err) {
+        if (isConnectionRefused(err)) {
+          logger.info('Watch of %s connection refused with: %s', this.expectedTypeName, err.message)
+          await delay(randomize(this.period.asMilliseconds()))
+          continue
         }
-        try {
-          this.socket = this.listWatcher.watch(options)
-          await pEvent(this.socket, 'open', { timeout: this.connectTimeout.asMilliseconds() })
-        } catch (err) {
-          if (isExpiredError(err)) {
-            // Don't set LastSyncResourceVersionExpired - LIST call with ResourceVersion=RV already
-            // has a semantic that it returns data at least as fresh as provided RV.
-            // So first try to LIST with setting RV to resource version of last observed object.
-            logger.info('Watch of %s not opened with: %s', this.expectedTypeName, err.message)
-          } else {
-            logger.error('Watch of %s failed with: %s', this.expectedTypeName, err)
-          }
-          // If this is "connection refused" error, it means that most likely apiserver is not responsive.
-          // It doesn't make sense to re-list all objects because most likely we will be able to restart
-          // watch where we ended.
-          if (isConnectionRefused(err)) {
-            await delay(randomize(this.period.asMilliseconds()))
-            continue
-          }
-          return
+        if (isExpiredError(err)) {
+          // Don't set LastSyncResourceVersionUnavailable - LIST call with ResourceVersion=RV already
+          // has a semantic that it returns data at least as fresh as provided RV.
+          // So first try to LIST with setting RV to resource version of last observed object.
+          logger.info('Watch of %s closed with: %s', this.expectedTypeName, err.message)
+        } else {
+          logger.warn('Watch of %s ended with: %s', this.expectedTypeName, err)
         }
-        if (this.stopRequested) {
-          return
-        }
-        // run websocket heartbeat
-        (async () => {
-          try {
-            await this.heartbeat(this.socket)
-          } catch (err) { /* ignore error */ }
-        })()
-        // handle websocket messages
-        try {
-          await this.watchHandler(this.socket)
-        } catch (err) {
-          if (isExpiredError(err)) {
-            // Don't set LastSyncResourceVersionUnavailable - LIST call with ResourceVersion=RV already
-            // has a semantic that it returns data at least as fresh as provided RV.
-            // So first try to LIST with setting RV to resource version of last observed object.
-            logger.info('Watch of %s closed with: %s', this.expectedTypeName, err.message)
-          } else {
-            logger.warn('Watch of %s ended with: %s', this.expectedTypeName, err)
-          }
-          return
-        }
-      } finally {
-        await this.closeOrTerminateSocket()
+        return
       }
     }
   }
 
-  async heartbeat (socket) {
-    function ping () {
-      if (socket.isAlive === false) {
-        socket.terminate()
-      } else {
-        socket.isAlive = false
-        socket.ping()
-      }
-    }
-
-    const heartbeatIntervalId = setInterval(ping, this.heartbeatInterval.asMilliseconds())
-    try {
-      const asyncIterator = pEvent.iterator(socket, 'pong', {
-        resolutionEvents: ['close']
-      })
-      // eslint-disable-next-line no-unused-vars
-      for await (const data of asyncIterator) {
-        socket.isAlive = true
-      }
-    } finally {
-      clearInterval(heartbeatIntervalId)
-    }
-  }
-
-  async watchHandler (socket) {
+  async watchHandler (asyncIterable) {
     const begin = moment()
     let count = 0
-    const asyncIterator = pEvent.iterator(socket, 'message', {
-      resolutionEvents: ['close']
-    })
-    for await (const data of asyncIterator) {
+    for await (const data of asyncIterable) {
       count++
-      let event
-      try {
-        event = JSON.parse(data)
-      } catch (err) {
-        logger.error('Unable to parse event for watch %', this.expectedTypeName)
-        continue
+      if (data instanceof Error) {
+        throw data
       }
-      const { type, object } = event
+      const { type, object } = data
       if (type === 'ERROR') {
         throw new StatusError(object)
       }

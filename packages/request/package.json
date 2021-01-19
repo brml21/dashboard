@@ -24,8 +24,10 @@
     "test-coverage": "yarn test --coverage"
   },
   "dependencies": {
-    "got": "^11.5.2",
-    "http-errors": "^1.8.0"
+    "@gardener-dashboard/logger": "workspace:*",
+    "http-errors": "^1.8.0",
+    "quick-lru": "^5.1.1",
+    "type-is": "^1.6.18"
   },
   "devDependencies": {
     "eslint": "^7.7.0",

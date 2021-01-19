@@ -12,7 +12,10 @@ const { TimeoutError } = require('p-timeout')
 
 const CONNECTION_ERROR_CODES = [
   'ETIMEDOUT',
-  'ECONNREFUSED'
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'ERR_HTTP2_PING_CANCEL',
+  'ABORT_ERR'
 ]
 
 class StatusError extends Error {

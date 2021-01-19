@@ -7,7 +7,6 @@
 'use strict'
 
 const request = require('@gardener-dashboard/request')
-const { isHttpError } = require('http-errors')
 const WebSocket = require('ws')
 const { beforeConnect } = require('./debug')
 const { http, ws } = require('./symbols')
@@ -26,21 +25,15 @@ class HttpClient {
     return this[http.client].defaults.options.agent
   }
 
-  async [http.request] (url, { searchParams, ...options } = {}) {
+  [http.request] (url, { searchParams, ...options } = {}) {
     if (searchParams && searchParams.toString()) {
       options.searchParams = searchParams
     }
-    try {
-      return await this[http.client].request(url, options)
-    } catch (err) {
-      if (isHttpError(err)) {
-        const { body = {} } = err
-        if (body.message) {
-          err.message = body.message
-        }
-      }
-      throw err
-    }
+    return this[http.client].request(url, options)
+  }
+
+  [http.watch] (url, options = {}) {
+    return this[http.client].stream(url, options)
   }
 
   [ws.connect] (url, { searchParams, ...connectOptions } = {}) {

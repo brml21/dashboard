@@ -6,14 +6,13 @@
 
 'use strict'
 
-const { isPlainObject, isEmpty, get } = require('lodash')
-const { Agent } = require('http')
+const { isPlainObject, isEmpty } = require('lodash')
 const { join } = require('path')
 const { Mixin } = require('mixwith')
 
 const WatchBuilder = require('./WatchBuilder')
 const { Reflector } = require('./cache')
-const { http, ws } = require('./symbols')
+const { http } = require('./symbols')
 const { Store } = require('./cache')
 const { clusterScopedUrl, namespaceScopedUrl, setPatchType, PatchType } = require('./util')
 
@@ -62,9 +61,8 @@ const ClusterScoped = Mixin(superclass => class extends superclass {
 })
 
 ClusterScoped.Readable = superclass => class extends superclass {
-  get (name, { agent, searchParams, ...options } = {}) {
+  get (name, { searchParams, ...options } = {}) {
     assertName(name)
-    assertAgent(agent)
     assertSearchParams(searchParams)
     assertOptions(options)
     let url = clusterScopedUrl(this.constructor.names, name)
@@ -72,29 +70,27 @@ ClusterScoped.Readable = superclass => class extends superclass {
     if (isWatch(searchParams)) {
       addFieldSelector(searchParams, 'metadata.name', name)
       url = clusterScopedUrl(this.constructor.names)
-      return this[ws.connect](url, { agent, searchParams })
+      return this[http.watch](url, { method: 'get', searchParams })
     }
-    return this[http.request](url, { method: 'get', agent, searchParams })
+    return this[http.request](url, { method: 'get', searchParams })
   }
 
-  list ({ agent, searchParams, ...options } = {}) {
-    assertAgent(agent)
+  list ({ searchParams, ...options } = {}) {
     assertSearchParams(searchParams)
     assertOptions(options)
     const url = clusterScopedUrl(this.constructor.names)
     searchParams = normalizeSearchParams(searchParams, options)
     if (isWatch(searchParams)) {
-      return this[ws.connect](url, { agent, searchParams })
+      return this[http.watch](url, { method: 'get', searchParams })
     }
-    return this[http.request](url, { method: 'get', agent, searchParams })
+    return this[http.request](url, { method: 'get', searchParams })
   }
 }
 
 NamespaceScoped.Readable = superclass => class extends superclass {
-  get (namespace, name, { agent, searchParams, ...options } = {}) {
+  get (namespace, name, { searchParams, ...options } = {}) {
     assertNamespace(namespace)
     assertName(name)
-    assertAgent(agent)
     assertSearchParams(searchParams)
     assertOptions(options)
     let url = namespaceScopedUrl(this.constructor.names, namespace, name)
@@ -102,35 +98,33 @@ NamespaceScoped.Readable = superclass => class extends superclass {
     if (isWatch(searchParams)) {
       addFieldSelector(searchParams, 'metadata.name', name)
       url = namespaceScopedUrl(this.constructor.names, namespace)
-      return this[ws.connect](url, { agent, searchParams })
+      return this[http.watch](url, { method: 'get', searchParams })
     }
-    return this[http.request](url, { method: 'get', agent, searchParams })
+    return this[http.request](url, { method: 'get', searchParams })
   }
 
-  list (namespace, { agent, searchParams, ...options } = {}) {
+  list (namespace, { searchParams, ...options } = {}) {
     assertNamespace(namespace)
-    assertAgent(agent)
     assertSearchParams(searchParams)
     assertOptions(options)
     const url = namespaceScopedUrl(this.constructor.names, namespace)
     searchParams = normalizeSearchParams(searchParams, options)
     if (isWatch(searchParams)) {
-      return this[ws.connect](url, { agent, searchParams })
+      return this[http.watch](url, { method: 'get', searchParams })
     }
-    return this[http.request](url, { method: 'get', agent, searchParams })
+    return this[http.request](url, { method: 'get', searchParams })
   }
 
-  listAllNamespaces ({ agent, searchParams, ...options } = {}) {
-    assertAgent(agent)
+  listAllNamespaces ({ searchParams, ...options } = {}) {
     assertSearchParams(searchParams)
     assertOptions(options)
     const url = namespaceScopedUrl(this.constructor.names)
     searchParams = normalizeSearchParams(searchParams, options)
     if (isWatch(searchParams)) {
       searchParams.set('watch', true)
-      return this[ws.connect](url, { agent, searchParams })
+      return this[http.watch](url, { method: 'get', searchParams })
     }
-    return this[http.request](url, { method: 'get', agent, searchParams })
+    return this[http.request](url, { method: 'get', searchParams })
   }
 }
 
@@ -156,19 +150,17 @@ ClusterScoped.Cacheable = superclass => class extends superclass {
     assertStore(store)
     // create ListWatcher
     const { group, version, names } = this.constructor
-    const agent = createAgent(this)
     const listWatcher = {
-      agent,
       group,
       version,
       names,
       list: options => {
         const searchParams = new URLSearchParams(options)
-        return this.list({ agent, searchParams })
+        return this.list({ searchParams })
       },
       watch: options => {
         const searchParams = new URLSearchParams({ ...options, watch: true })
-        return this.list({ agent, searchParams })
+        return this.list({ searchParams })
       }
     }
     // create Reflector
@@ -184,19 +176,17 @@ NamespaceScoped.Cacheable = superclass => class extends superclass {
     assertStore(store)
     // create ListWatcher
     const { group, version, names } = this.constructor
-    const agent = createAgent(this)
     const listWatcher = {
-      agent,
       group,
       version,
       names,
       list: options => {
         const searchParams = new URLSearchParams(options)
-        return this.list(namespace, { agent, searchParams })
+        return this.list(namespace, { searchParams })
       },
       watch: options => {
         const searchParams = new URLSearchParams({ ...options, watch: true })
-        return this.list(namespace, { agent, searchParams })
+        return this.list(namespace, { searchParams })
       }
     }
     // create Reflector
@@ -209,19 +199,17 @@ NamespaceScoped.Cacheable = superclass => class extends superclass {
     assertStore(store)
     // create ListWatcher
     const { group, version, names } = this.constructor
-    const agent = createAgent(this)
     const listWatcher = {
-      agent,
       group,
       version,
       names,
       list: options => {
         const searchParams = new URLSearchParams(options)
-        return this.listAllNamespaces({ agent, searchParams })
+        return this.listAllNamespaces({ searchParams })
       },
       watch: options => {
         const searchParams = new URLSearchParams({ ...options, watch: true })
-        return this.listAllNamespaces({ agent, searchParams })
+        return this.listAllNamespaces({ searchParams })
       }
     }
     // create Reflector
@@ -469,12 +457,6 @@ function assertStore (store) {
   }
 }
 
-function assertAgent (agent) {
-  if (agent && !(agent instanceof Agent)) {
-    throw new TypeError('The parameter "agent" must be empty or an instance of Agent')
-  }
-}
-
 function assertSearchParams (searchParams) {
   if (searchParams && !(searchParams instanceof URLSearchParams)) {
     throw new TypeError('The parameter "searchParams" must be empty or an instance of URLSearchParams')
@@ -507,11 +489,6 @@ function isWatch (searchParams) {
 
 function normalizeSearchParams (searchParams, options) {
   return searchParams || new URLSearchParams(options)
-}
-
-function createAgent (cacheable, options = {}) {
-  const url = get(cacheable[http.client], 'defaults.options.prefixUrl')
-  return cacheable.constructor.createAgent(url, { maxSockets: 1, ...options })
 }
 
 module.exports = {

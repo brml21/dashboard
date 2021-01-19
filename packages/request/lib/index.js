@@ -6,12 +6,13 @@
 
 'use strict'
 
-const HttpClient = require('./HttpClient')
-const { extend, createHttpError, isHttpError } = HttpClient
+const Client = require('./Client')
+const { extend, createHttpError, isHttpError } = Client
 
 module.exports = {
-  HttpClient,
+  Client,
   extend,
   createHttpError,
-  isHttpError
+  isHttpError,
+  HttpClient: Client
 }
