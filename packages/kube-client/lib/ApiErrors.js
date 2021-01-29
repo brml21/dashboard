@@ -14,8 +14,7 @@ const CONNECTION_ERROR_CODES = [
   'ETIMEDOUT',
   'ECONNREFUSED',
   'ENETUNREACH',
-  'ERR_HTTP2_PING_CANCEL',
-  'ABORT_ERR'
+  'ERR_HTTP2_PING_CANCEL'
 ]
 
 class StatusError extends Error {
