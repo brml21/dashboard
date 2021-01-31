@@ -9,7 +9,7 @@
 const { mix } = require('mixwith')
 
 const { Core } = require('../groups')
-const { NamespaceScoped, ClusterScoped, Readable, Writable, Observable } = require('../mixins')
+const { NamespaceScoped, ClusterScoped, Readable, Writable, Observable, Cacheable } = require('../mixins')
 
 class Endpoints extends mix(Core).with(NamespaceScoped, Readable, Writable) {
   static get names () {
@@ -81,7 +81,7 @@ class Service extends mix(Core).with(NamespaceScoped, Readable, Observable, Writ
   }
 }
 
-class ServiceAccount extends mix(Core).with(NamespaceScoped, Readable, Observable, Writable) {
+class ServiceAccount extends mix(Core).with(NamespaceScoped, Readable, Observable, Writable, Cacheable) {
   static get names () {
     return {
       plural: 'serviceaccounts',

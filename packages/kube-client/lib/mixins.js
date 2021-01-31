@@ -11,9 +11,8 @@ const { join } = require('path')
 const { Mixin } = require('mixwith')
 
 const WatchBuilder = require('./WatchBuilder')
-const { Reflector } = require('./cache')
+const { Informer, ListWatcher } = require('./cache')
 const { http } = require('./symbols')
-const { Store } = require('./cache')
 const { clusterScopedUrl, namespaceScopedUrl, setPatchType, PatchType } = require('./util')
 
 // Plain subclass factories without deduplication, caching and instanceof support
@@ -61,7 +60,7 @@ const ClusterScoped = Mixin(superclass => class extends superclass {
 })
 
 ClusterScoped.Readable = superclass => class extends superclass {
-  get (name, { searchParams, ...options } = {}) {
+  get (name, { searchParams, signal, ...options } = {}) {
     assertName(name)
     assertSearchParams(searchParams)
     assertOptions(options)
@@ -70,25 +69,25 @@ ClusterScoped.Readable = superclass => class extends superclass {
     if (isWatch(searchParams)) {
       addFieldSelector(searchParams, 'metadata.name', name)
       url = clusterScopedUrl(this.constructor.names)
-      return this[http.watch](url, { method: 'get', searchParams })
+      return this[http.stream](url, { method: 'get', searchParams, signal })
     }
     return this[http.request](url, { method: 'get', searchParams })
   }
 
-  list ({ searchParams, ...options } = {}) {
+  list ({ searchParams, signal, ...options } = {}) {
     assertSearchParams(searchParams)
     assertOptions(options)
     const url = clusterScopedUrl(this.constructor.names)
     searchParams = normalizeSearchParams(searchParams, options)
     if (isWatch(searchParams)) {
-      return this[http.watch](url, { method: 'get', searchParams })
+      return this[http.stream](url, { method: 'get', searchParams, signal })
     }
     return this[http.request](url, { method: 'get', searchParams })
   }
 }
 
 NamespaceScoped.Readable = superclass => class extends superclass {
-  get (namespace, name, { searchParams, ...options } = {}) {
+  get (namespace, name, { searchParams, signal, ...options } = {}) {
     assertNamespace(namespace)
     assertName(name)
     assertSearchParams(searchParams)
@@ -98,31 +97,31 @@ NamespaceScoped.Readable = superclass => class extends superclass {
     if (isWatch(searchParams)) {
       addFieldSelector(searchParams, 'metadata.name', name)
       url = namespaceScopedUrl(this.constructor.names, namespace)
-      return this[http.watch](url, { method: 'get', searchParams })
+      return this[http.stream](url, { method: 'get', searchParams, signal })
     }
     return this[http.request](url, { method: 'get', searchParams })
   }
 
-  list (namespace, { searchParams, ...options } = {}) {
+  list (namespace, { searchParams, signal, ...options } = {}) {
     assertNamespace(namespace)
     assertSearchParams(searchParams)
     assertOptions(options)
     const url = namespaceScopedUrl(this.constructor.names, namespace)
     searchParams = normalizeSearchParams(searchParams, options)
     if (isWatch(searchParams)) {
-      return this[http.watch](url, { method: 'get', searchParams })
+      return this[http.stream](url, { method: 'get', searchParams, signal })
     }
     return this[http.request](url, { method: 'get', searchParams })
   }
 
-  listAllNamespaces ({ searchParams, ...options } = {}) {
+  listAllNamespaces ({ searchParams, signal, ...options } = {}) {
     assertSearchParams(searchParams)
     assertOptions(options)
     const url = namespaceScopedUrl(this.constructor.names)
     searchParams = normalizeSearchParams(searchParams, options)
     if (isWatch(searchParams)) {
       searchParams.set('watch', true)
-      return this[http.watch](url, { method: 'get', searchParams })
+      return this[http.stream](url, { method: 'get', searchParams, signal })
     }
     return this[http.request](url, { method: 'get', searchParams })
   }
@@ -142,80 +141,6 @@ ClusterScoped.Observable = superclass => class extends superclass {
     const url = clusterScopedUrl(this.constructor.names)
     const searchParams = new URLSearchParams(options)
     return WatchBuilder.create(this, url, searchParams)
-  }
-}
-
-ClusterScoped.Cacheable = superclass => class extends superclass {
-  syncList (store) {
-    assertStore(store)
-    // create ListWatcher
-    const { group, version, names } = this.constructor
-    const listWatcher = {
-      group,
-      version,
-      names,
-      list: options => {
-        const searchParams = new URLSearchParams(options)
-        return this.list({ searchParams })
-      },
-      watch: options => {
-        const searchParams = new URLSearchParams({ ...options, watch: true })
-        return this.list({ searchParams })
-      }
-    }
-    // create Reflector
-    const reflector = Reflector.create(listWatcher, store)
-    reflector.run()
-    return reflector
-  }
-}
-
-NamespaceScoped.Cacheable = superclass => class extends superclass {
-  syncList (namespace, store) {
-    assertNamespace(namespace)
-    assertStore(store)
-    // create ListWatcher
-    const { group, version, names } = this.constructor
-    const listWatcher = {
-      group,
-      version,
-      names,
-      list: options => {
-        const searchParams = new URLSearchParams(options)
-        return this.list(namespace, { searchParams })
-      },
-      watch: options => {
-        const searchParams = new URLSearchParams({ ...options, watch: true })
-        return this.list(namespace, { searchParams })
-      }
-    }
-    // create Reflector
-    const reflector = Reflector.create(listWatcher, store)
-    reflector.run()
-    return reflector
-  }
-
-  syncListAllNamespaces (store) {
-    assertStore(store)
-    // create ListWatcher
-    const { group, version, names } = this.constructor
-    const listWatcher = {
-      group,
-      version,
-      names,
-      list: options => {
-        const searchParams = new URLSearchParams(options)
-        return this.listAllNamespaces({ searchParams })
-      },
-      watch: options => {
-        const searchParams = new URLSearchParams({ ...options, watch: true })
-        return this.listAllNamespaces({ searchParams })
-      }
-    }
-    // create Reflector
-    const reflector = Reflector.create(listWatcher, store)
-    reflector.run()
-    return reflector
   }
 }
 
@@ -242,6 +167,38 @@ NamespaceScoped.Observable = superclass => class extends superclass {
     const url = namespaceScopedUrl(this.constructor.names)
     const searchParams = new URLSearchParams(options)
     return WatchBuilder.create(this, url, searchParams)
+  }
+}
+
+ClusterScoped.Cacheable = superclass => class extends superclass {
+  informer () {
+    // create ListWatcher
+    const ctor = this.constructor
+    const listFunc = ctor.prototype.list.bind(this)
+    const listWatcher = new ListWatcher(listFunc, ctor)
+    // create informer
+    return Informer.create(listWatcher)
+  }
+}
+
+NamespaceScoped.Cacheable = superclass => class extends superclass {
+  informer (namespace) {
+    assertNamespace(namespace)
+    // create ListWatcher
+    const ctor = this.constructor
+    const listFunc = ctor.prototype.list.bind(this, namespace)
+    const listWatcher = new ListWatcher(listFunc, ctor)
+    // create informer
+    return Informer.create(listWatcher)
+  }
+
+  informerAllNamespaces () {
+    // create ListWatcher
+    const ctor = this.constructor
+    const listFunc = ctor.prototype.listAllNamespaces.bind(this)
+    const listWatcher = new ListWatcher(listFunc, ctor)
+    // create informer
+    return Informer.create(listWatcher)
   }
 }
 
@@ -448,12 +405,6 @@ function assertNamespace (namespace) {
 function assertName (name) {
   if (typeof name !== 'string' || !name) {
     throw new TypeError('The parameter "name" must be a string')
-  }
-}
-
-function assertStore (store) {
-  if (!store || !(store instanceof Store)) {
-    throw new TypeError('The parameter "store" must be instance of Store')
   }
 }
 

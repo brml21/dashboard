@@ -100,10 +100,10 @@ class Client {
     })
   }
 
-  async fetch (path, { method = HTTP2_METHOD_GET, searchParams, headers = {}, body, ...options } = {}) {
+  async fetch (path, { method = HTTP2_METHOD_GET, searchParams, headers = {}, body, signal, ...options } = {}) {
     const session = this.getSession(options)
     headers = this.getRequestHeaders(method, path, searchParams, headers)
-    const stream = await session.request(headers)
+    const stream = await session.request(headers, { signal })
     if (body) {
       stream.write(body)
     }
@@ -155,7 +155,7 @@ class Client {
       },
       async * [Symbol.asyncIterator] () {
         let data = Buffer.from([])
-        const transform = transforFactory(this.type)
+        const transform = transformFactory(this.type)
         for await (const chunk of stream) {
           data = Buffer.concat([data, chunk], data.length + chunk.length)
           let index
@@ -202,7 +202,7 @@ function extend (options) {
   return new Client(options)
 }
 
-function transforFactory (type) {
+function transformFactory (type) {
   switch (type) {
     case 'text':
       return data => data.toString('utf8')

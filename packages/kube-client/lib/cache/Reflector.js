@@ -11,6 +11,7 @@ const delay = require('delay')
 const moment = require('moment')
 const { globalLogger: logger } = require('@gardener-dashboard/logger')
 const ListPager = require('./ListPager')
+const BackoffManager = require('./BackoffManager')
 const {
   isExpiredError,
   isConnectionRefused,
@@ -26,41 +27,6 @@ function getTypeName (apiVersion, kind) {
   return `${apiVersion}, Kind=${kind}`
 }
 
-class BackoffManager {
-  constructor ({ min = 800, max = 15 * 1000, resetDuration = 60 * 1000, factor = 1.5, jitter = 0.1 } = {}) {
-    this.min = min
-    this.max = max
-    this.factor = factor
-    this.jitter = jitter > 0 && jitter <= 1 ? jitter : 0
-    this.resetDuration = resetDuration
-    this.attempt = 0
-    this.timeoutId = undefined
-  }
-
-  duration () {
-    this.clearTimeout()
-    this.timeoutId = setTimeout(() => this.reset(), this.resetDuration)
-    const attempt = this.attempt
-    this.attempt += 1
-    if (attempt > Math.floor(Math.log(this.max / this.min) / Math.log(this.factor))) {
-      return this.max
-    }
-    let duration = this.min * Math.pow(this.factor, attempt)
-    if (this.jitter) {
-      duration = Math.floor((1 + this.jitter * (2 * Math.random() - 1)) * duration)
-    }
-    return Math.min(Math.floor(duration), this.max)
-  }
-
-  reset () {
-    this.attempt = 0
-  }
-
-  clearTimeout () {
-    clearTimeout(this.timeoutId)
-  }
-}
-
 class Reflector {
   constructor (listWatcher, store) {
     this.listWatcher = listWatcher
@@ -72,6 +38,7 @@ class Reflector {
     this.paginatedResult = false
     this.stopRequested = false
     this.backoffManager = new BackoffManager()
+    this.initConnBackoffManager = new BackoffManager()
   }
 
   get apiVersion () {
@@ -103,33 +70,44 @@ class Reflector {
     return this.lastSyncResourceVersion
   }
 
-  stop () {
-    this.stopRequested = true
-    const agent = this.listWatcher.agent
-    if (agent && typeof agent.destroy === 'function') {
-      agent.destroy()
-    }
-    this.backoffManager.clearTimeout()
+  setAbortSignal (signal) {
+    Object.defineProperty(this, 'signal', {
+      value: signal
+    })
+    this.listWatcher.setAbortSignal(signal)
   }
 
-  async run () {
+  async run (signal) {
+    if (this.signal) {
+      throw TypeError('Reflector has already been launched')
+    } else if (signal instanceof AbortSignal) {
+      this.setAbortSignal(signal)
+    } else {
+      throw TypeError('Abort signal is required')
+    }
     logger.info('Starting reflector %s', this.expectedTypeName)
     try {
-      while (!this.stopRequested) {
+      while (!this.signal.aborted) {
         try {
           await this.listAndWatch()
         } catch (err) {
           logger.error('Failed to list and watch %s: %s', this.expectedTypeName, err)
         }
-        if (this.stopRequested) {
+        if (this.signal.aborted) {
           break
         }
-        logger.info('Restarting reflector %s', this.expectedTypeName)
         await delay(this.backoffManager.duration())
+        logger.info('Restarting reflector %s', this.expectedTypeName)
       }
     } finally {
+      this.backoffManager.clearTimeout()
+      this.initConnBackoffManager.clearTimeout()
       logger.info('Stopped reflector %s', this.expectedTypeName)
     }
+  }
+
+  syncWith (items, resourceVersion) {
+    this.store.replace(items, resourceVersion)
   }
 
   async listAndWatch () {
@@ -157,8 +135,6 @@ class Reflector {
       // we don't introduce regression.
       pager.pageSize = 0
     }
-
-    this.store.setRefreshing()
 
     let list
     try {
@@ -210,17 +186,13 @@ class Reflector {
     }
 
     this.isLastSyncResourceVersionUnavailable = false
-    this.store.replace(list.items)
+    this.syncWith(list.items, resourceVersion)
     this.lastSyncResourceVersion = resourceVersion
-    while (!this.stopRequested) {
+    while (!this.signal.aborted) {
       const options = {
         allowWatchBookmarks: true,
         timeoutSeconds: randomize(this.minWatchTimeout.asSeconds()),
         resourceVersion: this.lastSyncResourceVersion
-      }
-
-      if (this.stopRequested) {
-        return
       }
 
       try {
@@ -228,9 +200,16 @@ class Reflector {
         const asyncIterable = await this.listWatcher.watch(options)
         await this.watchHandler(asyncIterable)
       } catch (err) {
+        if (this.signal.aborted) {
+          return
+        }
         if (isConnectionRefused(err)) {
-          logger.info('Watch of %s connection refused with: %s', this.expectedTypeName, err.message)
-          await delay(randomize(this.period.asMilliseconds()))
+          // If this is "connection refused" error, it means that most likely apiserver is not responsive.
+          // It doesn't make sense to re-list all objects because most likely we will be able to restart
+          // watch where we ended.
+          // If that's the case begin exponentially backing off and resend watch request.
+          logger.info('Watch of %s refused connection with: %s', this.expectedTypeName, err.message)
+          await delay(this.initConnBackoffManager.duration())
           continue
         }
         if (isExpiredError(err)) {
@@ -239,7 +218,7 @@ class Reflector {
           // So first try to LIST with setting RV to resource version of last observed object.
           logger.info('Watch of %s closed with: %s', this.expectedTypeName, err.message)
         } else {
-          logger.warn('Watch of %s ended with: %s', this.expectedTypeName, err)
+          logger.warn('Watch of %s ended with: %s', this.expectedTypeName, err.message)
         }
         return
       }
@@ -249,12 +228,14 @@ class Reflector {
   async watchHandler (asyncIterable) {
     const begin = moment()
     let count = 0
-    for await (const data of asyncIterable) {
+    for await (let event of asyncIterable) {
       count++
-      if (data instanceof Error) {
-        throw data
+      if (event instanceof Error) {
+        throw event
+      } else if (Buffer.isBuffer(event)) {
+        event = JSON.parse(event)
       }
-      const { type, object } = data
+      const { type, object } = event
       if (type === 'ERROR') {
         throw new StatusError(object)
       }
